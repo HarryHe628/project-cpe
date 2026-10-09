@@ -131,9 +131,15 @@ pub trait Modem {
 /// AT 指令的响应结果
 pub async fn send_at_command(conn: &Connection, cmd: &str) -> zbus::Result<String> {
     with_serial(async {
-        let proxy = Proxy::new(conn, "org.ofono", "/ril_0", "org.ofono.Modem").await?;
-        let result: String = proxy.call("SendAtcmd", &(cmd)).await?;
-        Ok(result)
+        let inner = async {
+            let proxy = Proxy::new(conn, "org.ofono", "/ril_0", "org.ofono.Modem").await?;
+            let result: String = proxy.call("SendAtcmd", &(cmd)).await?;
+            Ok::<String, zbus::Error>(result)
+        };
+        match tokio::time::timeout(Duration::from_secs(8), inner).await {
+            Ok(res) => res,
+            Err(_) => Err(zbus::Error::Failure("AT command timeout (8s)".into())),
+        }
     }).await
 }
 
