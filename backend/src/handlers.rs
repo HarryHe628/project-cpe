@@ -142,7 +142,9 @@ async fn fetch_neighbor_cells(
 /// }
 /// ```
 pub async fn get_cells(State(conn): State<Arc<Connection>>) -> impl IntoResponse {
-    let result = async {
+    let result = match tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        async {
         // 1. 获取服务小区信息（包含网络制式）
         let serving_cell = get_serving_cell_info(&conn)
             .await
@@ -167,8 +169,13 @@ pub async fn get_cells(State(conn): State<Arc<Connection>>) -> impl IntoResponse
             serving_cell,
             cells: all_cells,
         })
-    }
-    .await;
+    },
+    )
+    .await
+    {
+        Ok(inner) => inner,
+        Err(_) => Err("cell info timeout (3s)".to_string()),
+    };
 
     match result {
         Ok(data) => (
