@@ -22,11 +22,13 @@ use tracing::{info, warn};
 
 const DEFAULT_LOADER_SCRIPT: &str = r#"#!/bin/sh
 /home/root/ttyd/start.sh &
-/home/root/udx710 -p 80 &
+/home/root/udx710 -p 3000 &
 "#;
 const LOADER_SCRIPT_PATH: &str = "/home/root/loader.sh";
 const INIT_SCRIPT_PATH: &str = "/home/root/init.sh";
 const INIT_SCRIPT_LOADER_COMMAND: &str = "sh /home/root/init.sh &";
+/// 受管的后端启动行（为兼容第三方 loader.sh，只做加法插入，不覆盖）
+const MANAGED_BACKEND_LINE: &str = "/home/root/udx710 -p 3000 &";
 
 /// Webhook 配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -461,7 +463,7 @@ fn loader_is_plain_legacy_bootstrap(content: &str) -> bool {
     }
 
     if script_lines[1] != "/home/root/ttyd/start.sh &"
-        || script_lines[2] != "/home/root/udx710 -p 80 &"
+        || script_lines[2] != "/home/root/udx710 -p 3000 &"
     {
         return false;
     }
@@ -497,21 +499,32 @@ pub fn ensure_loader_hooks_init() -> Result<(), String> {
     };
 
     let stripped_content = remove_ota_command_from_loader(&current_content);
-    let missing_backend_command = !stripped_content
-        .lines()
-        .any(|line| line.trim() == "/home/root/udx710 -p 80 &");
 
-    let base_content = if loader_uses_ab_bootstrap(&current_content)
-        || loader_contains_ota_command(&current_content)
-        || missing_backend_command
-    {
-        DEFAULT_LOADER_SCRIPT.to_string()
-    } else if current_content.trim().is_empty()
-        || loader_is_plain_legacy_bootstrap(&current_content)
-    {
+    // 数源壳适配: 对已存在的第三方 loader.sh 只做"加法"(插入受管行), 绝不整体覆盖
+    let base_content = if current_content.trim().is_empty() {
         DEFAULT_LOADER_SCRIPT.to_string()
     } else {
-        stripped_content
+        let has_managed_line = stripped_content
+            .lines()
+            .any(|line| line.trim() == MANAGED_BACKEND_LINE);
+
+        if has_managed_line {
+            stripped_content.clone()
+        } else {
+            let mut lines: Vec<String> =
+                stripped_content.lines().map(|l| l.to_string()).collect();
+            let insert_at = if lines
+                .first()
+                .map(|l| l.trim_start().starts_with("#!"))
+                .unwrap_or(false)
+            {
+                1
+            } else {
+                0
+            };
+            lines.insert(insert_at, MANAGED_BACKEND_LINE.to_string());
+            lines.join("\n")
+        }
     };
 
     let updated_content = append_init_command_to_loader(&base_content);
@@ -580,7 +593,7 @@ mod tests {
 
     #[test]
     fn append_init_command_once_for_new_loader() {
-        let loader = "#!/bin/sh\n/home/root/ttyd/start.sh &\n/home/root/udx710 -p 80 &\n";
+        let loader = "#!/bin/sh\n/home/root/ttyd/start.sh &\n/home/root/udx710 -p 3000 &\n";
         let updated = append_init_command_to_loader(loader);
 
         assert!(updated.contains(INIT_SCRIPT_LOADER_COMMAND));
@@ -590,7 +603,7 @@ mod tests {
     #[test]
     fn append_init_command_is_idempotent() {
         let loader = format!(
-            "#!/bin/sh\n/home/root/ttyd/start.sh &\n/home/root/udx710 -p 80 &\n{}\n",
+            "#!/bin/sh\n/home/root/ttyd/start.sh &\n/home/root/udx710 -p 3000 &\n{}\n",
             INIT_SCRIPT_LOADER_COMMAND
         );
         let updated = append_init_command_to_loader(&loader);
@@ -612,10 +625,10 @@ mod tests {
 
     #[test]
     fn remove_ota_command_from_loader_strips_old_hook() {
-        let loader = "#!/bin/sh\n/home/root/ttyd/start.sh &\nsh /home/root/ota.sh &\n/home/root/udx710 -p 80 &\n";
+        let loader = "#!/bin/sh\n/home/root/ttyd/start.sh &\nsh /home/root/ota.sh &\n/home/root/udx710 -p 3000 &\n";
         let updated = remove_ota_command_from_loader(loader);
 
         assert!(!loader_contains_ota_command(&updated));
-        assert!(updated.contains("/home/root/udx710 -p 80 &"));
+        assert!(updated.contains("/home/root/udx710 -p 3000 &"));
     }
 }
