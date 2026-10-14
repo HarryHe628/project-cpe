@@ -240,6 +240,13 @@ async fn main() -> Result<()> {
         });
     }
 
+    // 启动系统统计后台采样器（每约 1 秒采样网速/CPU，供 /api/stats 即时应答）
+    {
+        tokio::spawn(async move {
+            crate::utils::stats_sampler_loop().await;
+        });
+    }
+
     // CORS 配置：允许前端开发服务器跨域访问
     let cors = CorsLayer::new()
         .allow_origin(Any)

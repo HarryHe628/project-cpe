@@ -856,49 +856,12 @@ pub async fn get_cpu_info() -> impl IntoResponse {
 /// }
 /// ```
 pub async fn get_system_stats() -> impl IntoResponse {
-    use std::time::{Duration, Instant};
-    use tokio::time::sleep;
-    
     let result: Result<SystemStatsResponse, String> = async {
-        // 获取网速和 CPU 使用率（并行异步采样）
-        let interfaces = get_active_interfaces()?;
-        let mut first_samples = Vec::new();
-        for interface in &interfaces {
-            match read_interface_stats(interface) {
-                Ok((rx, tx)) => first_samples.push((interface.clone(), rx, tx)),
-                Err(_) => continue,
-            }
-        }
-        
-        // 同时开始 CPU 采样
-        let cpu_usage_future = sample_cpu_usage();
-        
-        let start = Instant::now();
-        // 等待 1 秒采样网速（CPU 采样只需 200ms，会先完成）
-        let cpu_usage = cpu_usage_future.await.unwrap_or(0.0);
-        
-        // 补足剩余时间到 1 秒
-        let elapsed_so_far = start.elapsed();
-        if elapsed_so_far < Duration::from_secs(1) {
-            sleep(Duration::from_secs(1) - elapsed_so_far).await;
-        }
-        let elapsed = start.elapsed().as_secs_f64();
-        
-        let mut speed_data = Vec::new();
-        for (interface, rx1, tx1) in first_samples {
-            if let Ok((rx2, tx2)) = read_interface_stats(&interface) {
-                let rx_speed = ((rx2.saturating_sub(rx1)) as f64 / elapsed) as u64;
-                let tx_speed = ((tx2.saturating_sub(tx1)) as f64 / elapsed) as u64;
-                
-                speed_data.push(NetworkSpeed {
-                    interface,
-                    rx_bytes_per_sec: rx_speed,
-                    tx_bytes_per_sec: tx_speed,
-                    total_rx_bytes: rx2,
-                    total_tx_bytes: tx2,
-                });
-            }
-        }
+        // 网速与 CPU 使用率改为读取后台采样器快照（即时应答，不再阻塞约 1 秒）
+        let (speed_data, cpu_usage, elapsed) = match crate::utils::get_latest_stats() {
+            Some(snapshot) => (snapshot.interfaces, snapshot.cpu_usage, snapshot.elapsed_secs),
+            None => (Vec::new(), 0.0, 1.0),
+        };
         
         // 获取内存信息
         let (total, available, cached, buffers) = read_memory_info()?;

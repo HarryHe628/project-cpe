@@ -1395,3 +1395,84 @@ pub fn build_splband_nr_command(fdd_mask: u16, tdd_mask: u16) -> String {
     format!("AT+SPLBAND=2,{},0,{},0", fdd_mask, tdd_mask)
 }
 
+/// 系统统计快照（由后台采样任务每秒更新，供 /api/stats 即时应答）
+#[derive(Clone)]
+pub struct StatsSnapshot {
+    /// 各接口网速（按采样窗口计算）
+    pub interfaces: Vec<crate::models::NetworkSpeed>,
+    /// CPU 使用率百分比
+    pub cpu_usage: f64,
+    /// 本快照的采样窗口时长（秒）
+    pub elapsed_secs: f64,
+}
+
+static LATEST_STATS: std::sync::Mutex<Option<StatsSnapshot>> = std::sync::Mutex::new(None);
+
+/// 获取最新的系统统计快照（无数据时返回 None）
+pub fn get_latest_stats() -> Option<StatsSnapshot> {
+    LATEST_STATS.lock().ok().and_then(|guard| guard.clone())
+}
+
+/// 后台采样循环：每约 1 秒采样一次网速与 CPU 使用率，写入共享快照。
+/// 这样 /api/stats 可以即时应答，不再阻塞约 1 秒（避免 1 秒刷新档下请求互相顶掉）。
+pub async fn stats_sampler_loop() {
+    use tokio::time::{sleep, Duration, Instant};
+
+    let mut prev: Vec<(String, u64, u64)> = Vec::new();
+    let mut prev_at: Option<Instant> = None;
+    let mut last_interfaces: Vec<crate::models::NetworkSpeed> = Vec::new();
+
+    loop {
+        // 采样各接口流量计数
+        let mut now_samples: Vec<(String, u64, u64)> = Vec::new();
+        if let Ok(interfaces) = get_active_interfaces() {
+            for interface in &interfaces {
+                if let Ok((rx, tx)) = read_interface_stats(interface) {
+                    now_samples.push((interface.clone(), rx, tx));
+                }
+            }
+        }
+
+        let now = Instant::now();
+        let mut speed_data: Vec<crate::models::NetworkSpeed> = Vec::new();
+        let mut elapsed = 1.0_f64;
+
+        if let Some(prev_at_value) = prev_at {
+            elapsed = now.duration_since(prev_at_value).as_secs_f64().max(0.2);
+            for (name, rx, tx) in &now_samples {
+                if let Some((_, prev_rx, prev_tx)) = prev.iter().find(|(n, _, _)| n == name) {
+                    speed_data.push(crate::models::NetworkSpeed {
+                        interface: name.clone(),
+                        rx_bytes_per_sec: ((rx.saturating_sub(*prev_rx)) as f64 / elapsed) as u64,
+                        tx_bytes_per_sec: ((tx.saturating_sub(*prev_tx)) as f64 / elapsed) as u64,
+                        total_rx_bytes: *rx,
+                        total_tx_bytes: *tx,
+                    });
+                }
+            }
+        }
+
+        if speed_data.is_empty() {
+            // 首轮采样或接口暂不可用时，保留上一轮数据
+            speed_data = last_interfaces.clone();
+        } else {
+            last_interfaces = speed_data.clone();
+        }
+
+        // CPU 使用率（约 200ms，在后台任务中执行，不影响接口响应速度）
+        let cpu_usage = sample_cpu_usage().await.unwrap_or(0.0);
+
+        if let Ok(mut guard) = LATEST_STATS.lock() {
+            *guard = Some(StatsSnapshot {
+                interfaces: speed_data,
+                cpu_usage,
+                elapsed_secs: elapsed,
+            });
+        }
+
+        prev = now_samples;
+        prev_at = Some(now);
+        sleep(Duration::from_secs(1)).await;
+    }
+}
+
